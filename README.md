@@ -115,6 +115,7 @@ source install/setup.bash
 ros2 launch super_lio relocation.py
 ```
 
+the relocation method is unstable. 
 
 ## Datasets
 <p align="center">
