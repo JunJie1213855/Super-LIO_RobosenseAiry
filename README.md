@@ -69,6 +69,39 @@ ros2 launch super_lio Livox_mid360.py
 
 ```
 
+### Supported LiDARs
+
+Super-LIO supports multiple LiDAR models. Select the appropriate launch file and config:
+
+| LiDAR | Launch File | Config |
+|-------|------------|--------|
+| Livox Mid-360 | `Livox_mid360.py` | `livox_360.yaml` |
+| Livox Avia | `Livox_mid360.py` | `livox_360.yaml` |
+| Hesai XT16 | `hesai.py` | `hesai.yaml` |
+| Velodyne VLP-16 | `M2DGR.py` | `M2DGR.yaml` |
+| Ouster OS1-64 | `r3live.py` | `r3live.yaml` |
+| **RoboSense Airy / M1** | **`robosense_airy.py`** | **`robosense_airy.yaml`** |
+
+#### RoboSense Airy / M1
+
+```bash
+ros2 launch super_lio robosense_airy.py
+```
+
+Default topics: `/rslidar_points` (LiDAR), `/rslidar_imu_data` (IMU).  
+Airy outputs **organized point clouds** (96 scan lines) with per-point `ring` and `timestamp` fields.  
+Key config parameters in `config/robosense_airy.yaml`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lio.sensor.lidar_type` | `8` | RS_AIRY type identifier |
+| `lio.sensor.scan_line` | `96` | Number of scan lines |
+| `lio.sensor.timestamp_unit` | `0` | Timestamp unit: 0=sec, 1=ms, 2=us, 3=ns |
+| `lio.sensor.blind` | `1.0` | Blind zone radius (m) |
+| `lio.sensor.maxrange` | `150.0` | Maximum range (m) |
+
+> **Note**: Adjust `lio.extrinsic.lidar_imu` in the config to match your sensor's extrinsic calibration.
+
 #### 🔁 Relocalization Mode
 Super-LIO supports relocalization using a pre-built map, allowing the system to resume localization from a saved map without restarting the mapping process.
 This mode is useful for long-term deployment, repeated missions, or recovery after tracking loss.
