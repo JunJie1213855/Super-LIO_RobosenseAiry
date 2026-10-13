@@ -18,6 +18,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'sensor_config': PathJoinSubstitution([share, 'config', 'unitree_l1.yaml']),
+                'slam_config': PathJoinSubstitution([share, 'config', 'unitree_slam.yaml']),
                 'rviz': LaunchConfiguration('rviz'),
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
             }.items(),

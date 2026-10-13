@@ -47,7 +47,8 @@ ros2 launch super_lio_slam unitree_slam.launch.py rviz:=true use_sim_time:=true
 ros2 bag play /home/ros/dataset/unitree/L1 --clock
 ```
 
-`config/unitree_l1.yaml` selects LiDAR type `9`. The adapter reads the
+`config/unitree_l1.yaml` selects LiDAR type `9`, and `config/unitree_slam.yaml`
+sets STD extraction thresholds for the sparse L1 keyframe clouds. The adapter reads the
 `PointCloud2` fields `x`, `y`, `z`, `intensity`, `ring`, and float32 `time`;
 `time` is a per-point offset from the message header in seconds (adjust
 `lio.sensor.timestamp_unit` if another Unitree driver uses milliseconds,

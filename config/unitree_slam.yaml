@@ -1,0 +1,68 @@
+super_lio_node:
+  ros__parameters:
+    slam.keyframe.enable: true
+    slam.keyframe.distance: 1.5
+    slam.keyframe.angle_deg: 10.0
+    slam.keyframe.max_interval: 3.0
+    slam.keyframe.min_points: 100
+    slam.keyframe.voxel_leaf: 0.5
+
+loop_backend_node:
+  ros__parameters:
+    # STD extraction tuned for sparse Unitree L1 keyframe clouds.
+    # Keep this separate from the denser LiDAR default in slam.yaml.
+    ds_size: 0.5
+    maximum_corner_num: 100
+    plane_detection_thre: 0.05
+    plane_merge_normal_thre: 0.2
+    voxel_size: 2.0
+    voxel_init_num: 5
+    proj_image_resolution: 0.5
+    proj_dis_min: 0.0
+    proj_dis_max: 5.0
+    corner_thre: 2.0
+    descriptor_near_num: 10
+    descriptor_min_len: 0.5
+    descriptor_max_len: 50.0
+    non_max_suppression_radius: 1.0
+    std_side_resolution: 0.2
+    skip_near_num: 50
+    candidate_num: 50
+    sub_frame_num: 10
+    vertex_diff_threshold: 0.5
+    rough_dis_threshold: 0.01
+    normal_threshold: 0.2
+    dis_threshold: 0.5
+    icp_threshold: 0.4
+
+    # ICP turns a candidate into a measured relative pose only if it passes gates.
+    keyframe_cloud_voxel_size: 0.25
+    keyframe_cloud_max_points: 30000
+    icp_voxel_size: 0.5
+    icp_max_correspondence_distance: 2.0
+    icp_max_iterations: 40
+    icp_fitness_threshold: 0.8
+    icp_min_overlap_ratio: 0.35
+    icp_max_translation_correction: 5.0
+    icp_max_rotation_correction_deg: 20.0
+    icp_submap_half_width: 5
+    icp_min_points: 100
+    icp_max_source_points: 10000
+    icp_max_target_points: 50000
+
+    # iSAM2 graph, corrected map, and repeated-loop suppression.
+    loop_min_interval: 20
+    graph_prior_translation_sigma: 0.001
+    graph_prior_rotation_sigma: 0.001
+    graph_odom_translation_sigma: 0.1
+    graph_odom_rotation_sigma: 0.05
+    graph_loop_translation_sigma: 0.2
+    graph_loop_rotation_sigma: 0.1
+    graph_loop_huber_k: 1.345
+    std_visualization_max_triangles: 100
+    map_publish_stride: 30
+    map_max_keyframes: 2000
+    map_max_points_per_keyframe: 1000
+    map_voxel_size: 0.5
+    path_max_poses: 10000
+    tf_publish_rate_hz: 20.0
