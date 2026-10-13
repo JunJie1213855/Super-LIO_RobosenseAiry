@@ -51,5 +51,6 @@
     lio.output.map: true
     lio.output.dense: false
     lio.output.pub_step: 1
-
+    # Publish the full deskewed current scan on /lio/cloud_world.
+    lio.output.dense: true
     lio.eva.timer: false

@@ -38,6 +38,8 @@ ros2 launch super_lio_slam robo_slam.launch.py rviz:=true use_sim_time:=true
 ros2 bag play /home/ros/dataset/robosense/mapping --clock
 ```
 
+The Robosense configuration publishes the full deskewed scan on `/lio/cloud_world` (`lio.output.dense: true`). This changes the front-end visualization output; STD/ICP use the separately filtered keyframes. The corrected `/lio_slam/map` is independently downsampled by the backend map settings in `config/slam.yaml`.
+
 `config/robosense_airy.yaml` enables `lio.ros.align_sensor_time_to_ros_clock`. It waits for the simulated ROS clock, then computes one offset for published odometry, clouds, keyframes, and TF; the LIO estimator still uses the original shared device time for LiDAR/IMU synchronization. Other sensor configurations leave this opt-in setting disabled.
 
 For a Unitree UniLiDAR L1 publishing `/unilidar/cloud` and `/unilidar/imu`, use:
