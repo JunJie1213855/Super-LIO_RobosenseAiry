@@ -296,6 +296,8 @@ ROSWrapper::ROSWrapper(const rclcpp::NodeOptions& options)
 }
 
 bool ROSWrapper::initializeOutputTime(double sensor_time) {
+  // Sensor and bag clocks can use different epochs. Apply one fixed offset to
+  // published stamps only when explicitly enabled; never alter estimator time.
   if (!align_sensor_time_to_ros_clock_ || output_time_initialized_) return true;
   if (use_sim_time_ && !get_clock()->ros_time_is_active()) return false;
   const double ros_time = now().seconds();
@@ -317,6 +319,8 @@ builtin_interfaces::msg::Time ROSWrapper::outputStamp(double sensor_time) const 
 
 
 void ROSWrapper::setupIO(){
+  // Sensor callbacks share a mutually-exclusive group because they append to
+  // the same ordered buffers consumed by sync_measure().
   //// input ======================================
   cb_sensor_ = this->create_callback_group(
       rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -373,6 +377,9 @@ void ROSWrapper::setupIO(){
   pub_cloud_world_ =
     this->create_publisher<sensor_msgs::msg::PointCloud2>(
         "/lio/cloud_world", 10);
+  pub_cloud_world_dense_ =
+    this->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/lio/cloud_world_dense", 10);
 
   tf_broadcaster_ =
       std::make_shared<tf2_ros::TransformBroadcaster>(this);
@@ -642,6 +649,9 @@ void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr ms
 
 
 bool ROSWrapper::sync_measure(MeasureGroup& meas){
+  // A LiDAR scan is usable only after IMU data reaches its end time. Consume
+  // exactly the IMU prefix inside that scan, preserving later samples for the
+  // next scan; this is the synchronization boundary for the LIO pipeline.
   if (lidar_buffer_.empty() || imu_buffer_.empty()) {
     return false;
   }
@@ -679,6 +689,8 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
 
 
 void ROSWrapper::pub_odom(const NavState& state){
+  // The estimator pose is world<-imu. Publish that convention consistently
+  // in odometry and TF so downstream clouds and keyframes have a clear frame.
   nav_msgs::msg::Odometry odom;
   odom.header.frame_id = "world";
 
@@ -757,6 +769,8 @@ void ROSWrapper::pub_odom(const NavState& state){
 void ROSWrapper::pub_keyframe(const CloudPtr& cloud,
                               const NavState& state, uint32_t id)
 {
+  // Pose is world<-imu, but the keyframe cloud stays in imu coordinates; the
+  // backend uses the pose to place it and to form relative loop constraints.
   super_lio_slam::msg::KeyFrame keyframe;
   keyframe.header.stamp = outputStamp(state.timestamp);
   keyframe.header.frame_id = "world";
@@ -782,6 +796,15 @@ void ROSWrapper::pub_cloud_world(const CloudPtr& pc, double time){
   cloud.header.frame_id = "world";
   cloud.header.stamp = outputStamp(time);
   pub_cloud_world_->publish(cloud);
+}
+
+
+void ROSWrapper::pub_cloud_world_dense(const CloudPtr& pc, double time){
+  sensor_msgs::msg::PointCloud2 cloud;
+  pcl::toROSMsg(*pc, cloud);
+  cloud.header.frame_id = "world";
+  cloud.header.stamp = outputStamp(time);
+  pub_cloud_world_dense_->publish(cloud);
 }
 
 

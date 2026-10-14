@@ -208,6 +208,8 @@ bool SuperLIO::map_init(){
 
 
 void SuperLIO::stateProcess(){
+  // Keep the scan pipeline ordered: deskew into one body frame, use a filtered
+  // copy for estimation/map insertion, then publish and hand off keyframes.
   frame_num_++;
   if(g_time_eva){
     time_record_.Evaluate([this](){Propagation_Undistort();}, "[Undistort]");
@@ -227,6 +229,9 @@ void SuperLIO::stateProcess(){
 
 
 void SuperLIO::PublishKeyframe(){
+  // Keyframes decouple the high-rate LIO loop from the slower loop backend.
+  // Motion thresholds avoid redundant frames; the time limit still guarantees
+  // progress during slow or nearly stationary motion.
   if (!keyframe_enabled_ || !scan_undistort_full_ || scan_undistort_full_->empty()) {
     return;
   }
@@ -417,6 +422,9 @@ inline double get_cpu_time_seconds() {
 
 
 void SuperLIO::Propagation_Undistort(){
+  // Predict through the scan's IMU interval, then interpolate each return's
+  // pose so every point is expressed at the scan-end IMU pose. This removes
+  // intra-scan motion before either the filter or map sees the cloud.
   propagate_states_.clear();
   propagate_states_.emplace_back(kf_->GetDynamicState());
   kf_->SetObsTime(measures_.lidar.end_time);
@@ -482,10 +490,13 @@ void SuperLIO::Propagation_Undistort(){
       pt_full.z = eigen_point[2];
     }
   });
+  // std::cout << "point size : " << scan_undistort_full_->points.size() << "\n";
 }
 
 
 void SuperLIO::DownSample(){
+  // This reduced cloud is for the real-time ESKF/map workload; the untouched
+  // deskewed cloud remains available for dense visualization and keyframes.
   voxel_grid_fliter_.setInputCloud(scan_undistort_full_);
   voxel_grid_fliter_.filter(ds_undistort_);
 }
@@ -499,6 +510,9 @@ struct ThreadACC{
 
 
 void SuperLIO::Observe(){
+  // Build point-to-plane residuals against the current map and accumulate
+  // their Jacobians into the ESKF update. Invalid neighbors/planes are pruned
+  // as iterations proceed, keeping the update both robust and efficient.
   size_t ptsize = ds_undistort_->size();
   
   static std::vector<float> _lengths;
@@ -597,6 +611,8 @@ void SuperLIO::Observe(){
 
 
 void SuperLIO::UpdateMap() {
+  // Insert only after the scan has corrected the state, so new points do not
+  // become their own reference surfaces during this scan's observation step.
   const size_t ptsize = ds_undistort_->size();
   if (ptsize == 0) return;
   
@@ -617,6 +633,8 @@ void SuperLIO::UpdateMap() {
 
 
 void SuperLIO::Output(){
+  // Pose and point clouds share the scan-end timestamp; dense output uses the
+  // full deskewed scan, while the regular visualization path may be throttled.
   auto state = kf_->GetNavState();
   data_wrapper_->pub_odom(state);  
 
@@ -624,8 +642,16 @@ void SuperLIO::Output(){
   transformation.block<3, 3>(0, 0) = state.R.R_.cast<float>();
   transformation.block<3, 1>(0, 3) = state.p.cast<float>();
 
-  CloudPtr world_pc(new PointCloudType());
-  
+  // Keep this full, deskewed scan separate from the voxel-filtered points
+  // used by Observe() and from the optional keyframe downsampling path.
+  CloudPtr dense_world(new PointCloudType());
+  if (g_visual_dense && scan_undistort_full_ &&
+      !scan_undistort_full_->empty()) {
+    pcl::transformPointCloud(*scan_undistort_full_, *dense_world,
+                             transformation);
+    data_wrapper_->pub_cloud_world_dense(dense_world, state.timestamp);
+  }
+
   if(g_visual_map){
     static int count = -1;
     count++;
@@ -634,9 +660,11 @@ void SuperLIO::Output(){
     }
     count = 0;
     if(g_visual_dense){
-      pcl::transformPointCloud(*scan_undistort_full_, *world_pc, transformation);
-      data_wrapper_->pub_cloud_world(world_pc, state.timestamp);
+      if (!dense_world->empty()) {
+        data_wrapper_->pub_cloud_world(dense_world, state.timestamp);
+      }
     }else{
+      CloudPtr world_pc(new PointCloudType());
       pcl::transformPointCloud(*ds_undistort_, *world_pc, transformation);
       data_wrapper_->pub_cloud_world(world_pc, state.timestamp);
     }

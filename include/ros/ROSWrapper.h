@@ -70,6 +70,7 @@ public:
   void pub_keyframe(const BASIC::CloudPtr& cloud, const NavState& state,
                     uint32_t id);
   void pub_cloud_world(const BASIC::CloudPtr& pc, double time);
+  void pub_cloud_world_dense(const BASIC::CloudPtr& pc, double time);
   void pub_cloud2planner(const BASIC::CloudPtr& pc, double time);
   void pub_cloud_world_pose(const BASIC::CloudPtr& pc, 
                             const NavState& state);
@@ -130,6 +131,7 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_robo_odom_;  /// IMU fre   --> Robot frame
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_world_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_world_dense_;
 };
 
 } // namespace END.

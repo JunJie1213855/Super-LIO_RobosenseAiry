@@ -52,8 +52,11 @@ class LoopBackendNode final : public rclcpp::Node {
   CloudPtr downsample(const CloudPtr &cloud, double voxel_size,
                       std::size_t max_points) const;
   CloudPtr historicalSubmap(std::size_t historical_index) const;
+  CloudPtr descriptorSubmap(const CloudPtr &current_cloud,
+                            const gtsam::Pose3 &current_pose) const;
   std::unique_ptr<IcpObservation> verifyWithIcp(
-      const CloudPtr &current_cloud, std::size_t historical_index,
+      const CloudPtr &current_cloud, std::size_t current_index,
+      std::size_t historical_index,
       const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const;
 
   void addGraphNode(std::size_t index, const gtsam::Pose3 &raw_pose,
@@ -105,6 +108,11 @@ class LoopBackendNode final : public rclcpp::Node {
   int icp_max_source_points_ = 10000;
   int icp_max_target_points_ = 50000;
   int loop_min_interval_ = 20;
+  int std_submap_num_frames_ = 1;
+  double std_submap_max_distance_ = 6.0;
+  int icp_max_std_candidates_ = 3;
+  int loop_min_descriptor_inliers_ = 4;
+  int loop_diagnostic_stride_ = 1;
   int map_publish_stride_ = 30;
   int map_max_keyframes_ = 2000;
   int map_max_points_per_keyframe_ = 1000;
@@ -113,6 +121,7 @@ class LoopBackendNode final : public rclcpp::Node {
   int std_visualization_max_triangles_ = 100;
   double tf_publish_rate_hz_ = 20.0;
   std::size_t last_loop_index_ = 0;
+  std::size_t last_loop_historical_index_ = 0;
   bool have_loop_ = false;
   bool have_input_id_ = false;
   uint32_t last_input_id_ = 0;

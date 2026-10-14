@@ -304,6 +304,8 @@ void publish_std_pairs(
 void STDescManager::GenerateSTDescs(
     pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
     std::vector<STDesc> &stds_vec) {
+  // Convert one local scan/submap into searchable geometry: detect planes,
+  // extract structural corners, then encode nearby corner triples as STDs.
   if (!input_cloud || config_setting_.voxel_size_ <= 0 ||
       !std::isfinite(config_setting_.voxel_size_)) {
     stds_vec.clear();
@@ -348,8 +350,16 @@ void STDescManager::GenerateSTDescs(
 void STDescManager::SearchLoop(
     const std::vector<STDesc> &stds_vec, std::pair<int, double> &loop_result,
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
-    std::vector<std::pair<STDesc, STDesc>> &loop_std_pair) {
+    std::vector<std::pair<STDesc, STDesc>> &loop_std_pair,
+    STDSearchDiagnostics *diagnostics,
+    std::vector<STDLoopCandidate> *verified_candidates) {
 
+  // Search is deliberately split into a cheap descriptor/hash proposal stage
+  // and geometric verification. Returned transforms are hypotheses for ICP,
+  // not yet measurements trusted by the pose graph.
+
+  if (diagnostics) *diagnostics = STDSearchDiagnostics{};
+  if (verified_candidates) verified_candidates->clear();
   loop_result = std::pair<int, double>(-1, 0);
   loop_transform.first.setZero();
   loop_transform.second.setIdentity();
@@ -361,7 +371,7 @@ void STDescManager::SearchLoop(
   // step1, select candidates, default number 50
   auto t1 = std::chrono::high_resolution_clock::now();
   std::vector<STDMatchList> candidate_matcher_vec;
-  candidate_selector(stds_vec, candidate_matcher_vec);
+  candidate_selector(stds_vec, candidate_matcher_vec, diagnostics);
 
   auto t2 = std::chrono::high_resolution_clock::now();
   // step2, select best candidates from rough candidates
@@ -373,14 +383,33 @@ void STDescManager::SearchLoop(
     double verify_score = -1;
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> relative_pose;
     std::vector<std::pair<STDesc, STDesc>> sucess_match_vec;
+    int max_votes = 0;
     candidate_verify(candidate_matcher_vec[i], verify_score, relative_pose,
-                     sucess_match_vec);
+                     sucess_match_vec, &max_votes);
+    if (diagnostics) {
+      diagnostics->candidates.push_back(STDCandidateDiagnostics{
+          candidate_matcher_vec[i].match_id_.second,
+          candidate_matcher_vec[i].match_list_.size(), max_votes,
+          sucess_match_vec.size(), verify_score});
+    }
+    if (verified_candidates && verify_score > config_setting_.icp_threshold_) {
+      verified_candidates->push_back(STDLoopCandidate{
+          candidate_matcher_vec[i].match_id_.second, verify_score,
+          sucess_match_vec.size(), relative_pose});
+    }
     if (verify_score > best_score) {
       best_score = verify_score;
       best_candidate_id = candidate_matcher_vec[i].match_id_.second;
       best_transform = relative_pose;
       best_sucess_match_vec = sucess_match_vec;
     }
+  }
+  if (verified_candidates) {
+    std::sort(verified_candidates->begin(), verified_candidates->end(),
+              [](const auto &a, const auto &b) {
+                return a.plane_score != b.plane_score
+                    ? a.plane_score > b.plane_score : a.frame_id < b.frame_id;
+              });
   }
   auto t3 = std::chrono::high_resolution_clock::now();
 
@@ -900,6 +929,9 @@ void STDescManager::non_maxi_suppression(
 void STDescManager::build_stdesc(
     const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &corner_points,
     std::vector<STDesc> &stds_vec) {
+  // Triangle side lengths and attached corner attributes make a compact
+  // rotation/translation-tolerant signature; vertex coordinates are retained
+  // so a matching triangle can later seed a rigid transform.
   stds_vec.clear();
   int near_num = config_setting_.descriptor_near_num_;
   if (!corner_points || corner_points->size() < 3 || near_num < 3 ||
@@ -1055,7 +1087,10 @@ void STDescManager::build_stdesc(
 
 void STDescManager::candidate_selector(
     const std::vector<STDesc> &stds_vec,
-    std::vector<STDMatchList> &candidate_matcher_vec) {
+    std::vector<STDMatchList> &candidate_matcher_vec,
+    STDSearchDiagnostics *diagnostics) {
+  // Hash nearby side-length bins first, then reject temporally adjacent frames,
+  // inconsistent triangle lengths and corner attributes before ranking places.
   candidate_matcher_vec.clear();
   if (config_setting_.candidate_num_ <= 0 ||
       current_frame_id_ > static_cast<unsigned int>(std::numeric_limits<int>::max())) {
@@ -1074,6 +1109,9 @@ void STDescManager::candidate_selector(
   // Database entries remain stable until AddSTDescs, which follows this search.
   using MatchRef = std::pair<size_t, const STDesc *>;
   std::vector<std::vector<MatchRef>> matches_per_descriptor(stds_vec.size());
+  std::vector<size_t> hash_counts(stds_vec.size(), 0);
+  std::vector<size_t> age_counts(stds_vec.size(), 0);
+  std::vector<size_t> side_counts(stds_vec.size(), 0);
   const unsigned int skip_near =
       static_cast<unsigned int>(std::max(0, config_setting_.skip_near_num_));
 #ifdef MP_EN
@@ -1096,16 +1134,19 @@ void STDescManager::candidate_selector(
         auto iter = data_base_.find(position);
         if (iter != data_base_.end()) {
           for (const STDesc &target_std : iter->second) {
+            ++hash_counts[i];
             if (src_std.frame_id_ <= target_std.frame_id_ ||
                 src_std.frame_id_ - target_std.frame_id_ <= skip_near ||
                 target_std.frame_id_ >
                     static_cast<unsigned int>(std::numeric_limits<int>::max())) {
               continue;
             }
+            ++age_counts[i];
             if ((src_std.side_length_ - target_std.side_length_).norm() >=
                 dis_threshold) {
               continue;
             }
+            ++side_counts[i];
             const double attached_sum =
                 (src_std.vertex_attached_ + target_std.vertex_attached_).norm();
             const double attached_difference =
@@ -1125,6 +1166,13 @@ void STDescManager::candidate_selector(
       }
     }
   }
+  if (diagnostics) {
+    for (size_t i = 0; i < stds_vec.size(); ++i) {
+      diagnostics->hash_candidates += hash_counts[i];
+      diagnostics->age_eligible += age_counts[i];
+      diagnostics->side_pass += side_counts[i];
+    }
+  }
   std::unordered_map<unsigned int, std::vector<MatchRef>> matches_by_frame;
   for (const auto &matches : matches_per_descriptor) {
     for (const auto &match : matches) {
@@ -1133,11 +1181,14 @@ void STDescManager::candidate_selector(
   }
   std::vector<std::pair<unsigned int, size_t>> ranked_frames;
   ranked_frames.reserve(matches_by_frame.size());
+  if (diagnostics) diagnostics->rough_frames = matches_by_frame.size();
   for (const auto &entry : matches_by_frame) {
+    if (diagnostics) diagnostics->rough_pairs += entry.second.size();
     if (entry.second.size() >= 5) {
       ranked_frames.emplace_back(entry.first, entry.second.size());
     }
   }
+  if (diagnostics) diagnostics->eligible_frames = ranked_frames.size();
   std::sort(ranked_frames.begin(), ranked_frames.end(),
             [](const auto &a, const auto &b) {
               return a.second != b.second ? a.second > b.second
@@ -1166,8 +1217,12 @@ void STDescManager::candidate_selector(
 void STDescManager::candidate_verify(
     const STDMatchList &candidate_matcher, double &verify_score,
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> &relative_pose,
-    std::vector<std::pair<STDesc, STDesc>> &sucess_match_vec) {
+    std::vector<std::pair<STDesc, STDesc>> &sucess_match_vec,
+    int *max_votes) {
+  // Each proposed triangle estimates a rigid transform; other triangle pairs
+  // vote for it. Only a consensus proceeds to plane-level geometric scoring.
   sucess_match_vec.clear();
+  if (max_votes) *max_votes = 0;
   if (candidate_matcher.match_list_.empty() ||
       candidate_matcher.match_id_.second < 0 || plane_cloud_vec_.empty() ||
       static_cast<size_t>(candidate_matcher.match_id_.second) >=
@@ -1223,6 +1278,7 @@ void STDescManager::candidate_verify(
       max_vote = vote_list[i];
     }
   }
+  if (max_votes) *max_votes = max_vote;
   if (max_vote >= 4) {
     auto best_pair = candidate_matcher.match_list_[max_vote_index * skip_len];
     int vote = 0;
@@ -1283,6 +1339,9 @@ double STDescManager::plane_geometric_verify(
     const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &source_cloud,
     const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &target_cloud,
     const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &transform) {
+  // Check whether transformed source planes land near target planes with
+  // compatible normals. The useful-match fraction is a geometric confidence,
+  // not a final loop constraint; ICP performs that final alignment in backend.
   if (!source_cloud || !target_cloud || source_cloud->empty() ||
       target_cloud->empty()) {
     return 0.0;

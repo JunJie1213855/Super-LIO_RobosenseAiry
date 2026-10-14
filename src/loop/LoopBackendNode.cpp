@@ -59,6 +59,12 @@ LoopBackendNode::LoopBackendNode() : rclcpp::Node("loop_backend_node") {
   icp_max_source_points_ = declare_parameter<int>("icp_max_source_points", 10000);
   icp_max_target_points_ = declare_parameter<int>("icp_max_target_points", 50000);
   loop_min_interval_ = declare_parameter<int>("loop_min_interval", 20);
+  std_submap_num_frames_ = declare_parameter<int>("std_submap_num_frames", 1);
+  std_submap_max_distance_ = declare_parameter<double>("std_submap_max_distance", 6.0);
+  icp_max_std_candidates_ = declare_parameter<int>("icp_max_std_candidates", 3);
+  loop_min_descriptor_inliers_ =
+      declare_parameter<int>("loop_min_descriptor_inliers", 4);
+  loop_diagnostic_stride_ = declare_parameter<int>("loop_diagnostic_stride", 1);
   map_publish_stride_ = declare_parameter<int>("map_publish_stride", 30);
   map_max_keyframes_ = declare_parameter<int>("map_max_keyframes", 2000);
   map_max_points_per_keyframe_ =
@@ -112,6 +118,13 @@ LoopBackendNode::LoopBackendNode() : rclcpp::Node("loop_backend_node") {
   icp_submap_half_width_ = std::max(0, icp_submap_half_width_);
   icp_max_iterations_ = std::max(1, icp_max_iterations_);
   loop_min_interval_ = std::max(0, loop_min_interval_);
+  std_submap_num_frames_ = std::clamp(std_submap_num_frames_, 1, 10);
+  if (!std::isfinite(std_submap_max_distance_) || std_submap_max_distance_ <= 0.0)
+    std_submap_max_distance_ = 6.0;
+  icp_max_std_candidates_ = std::clamp(icp_max_std_candidates_, 1, 10);
+  loop_min_descriptor_inliers_ =
+      std::clamp(loop_min_descriptor_inliers_, 4, 100);
+  loop_diagnostic_stride_ = std::max(0, loop_diagnostic_stride_);
   map_publish_stride_ = std::max(1, map_publish_stride_);
   map_max_points_per_keyframe_ = std::max(1, map_max_points_per_keyframe_);
   path_max_poses_ = std::max(1, path_max_poses_);
@@ -141,7 +154,6 @@ LoopBackendNode::LoopBackendNode() : rclcpp::Node("loop_backend_node") {
       "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
       std::bind(&LoopBackendNode::onKeyFrame, this, std::placeholders::_1));
 
-  RCLCPP_INFO(get_logger(), "STD, ICP and iSAM2 loop backend ready");
 }
 
 gtsam::Pose3 LoopBackendNode::poseFromMsg(const geometry_msgs::msg::Pose &pose) {
@@ -177,6 +189,8 @@ geometry_msgs::msg::Pose LoopBackendNode::poseToMsg(const gtsam::Pose3 &pose) {
 
 LoopBackendNode::CloudPtr LoopBackendNode::downsample(
     const CloudPtr &cloud, double voxel_size, std::size_t max_points) const {
+  // Voxel filtering controls density; deterministic stride-capping bounds
+  // runtime when a scan is exceptionally large or unevenly distributed.
   CloudPtr filtered(new Cloud);
   if (!cloud || cloud->empty()) return filtered;
   if (voxel_size > 0.01) {
@@ -220,6 +234,8 @@ LoopBackendNode::CloudPtr LoopBackendNode::convertAndFilter(
 
 LoopBackendNode::CloudPtr LoopBackendNode::historicalSubmap(
     std::size_t historical_index) const {
+  // ICP target combines neighboring old keyframes in the candidate frame.
+  // This gives more geometric overlap than one scan while staying local.
   CloudPtr submap(new Cloud);
   if (historical_index >= frames_.size()) return submap;
   const std::size_t half = static_cast<std::size_t>(icp_submap_half_width_);
@@ -243,9 +259,35 @@ LoopBackendNode::CloudPtr LoopBackendNode::historicalSubmap(
                     static_cast<std::size_t>(icp_max_target_points_));
 }
 
+LoopBackendNode::CloudPtr LoopBackendNode::descriptorSubmap(
+    const CloudPtr &current_cloud, const gtsam::Pose3 &current_pose) const {
+  // A few recent scans stabilize plane/corner extraction. Transform them into
+  // the current IMU frame so the resulting descriptors still map to one ID.
+  if (std_submap_num_frames_ == 1 || frames_.empty()) return current_cloud;
+  CloudPtr submap(new Cloud(*current_cloud));
+  const std::size_t count = std::min<std::size_t>(
+      frames_.size(), static_cast<std::size_t>(std_submap_num_frames_ - 1));
+  for (std::size_t offset = 1; offset <= count; ++offset) {
+    const Frame &prior = frames_[frames_.size() - offset];
+    if (!prior.cloud || prior.cloud->empty()) continue;
+    const gtsam::Pose3 current_from_prior = current_pose.between(prior.odom_pose);
+    if (current_from_prior.translation().norm() > std_submap_max_distance_) continue;
+    Cloud transformed;
+    pcl::transformPointCloud(*prior.cloud, transformed,
+                             current_from_prior.matrix().cast<float>());
+    *submap += transformed;
+  }
+  // The descriptor cloud remains in the current IMU frame. Its frame ID and
+  // plane cloud therefore still refer to exactly one graph keyframe.
+  return downsample(submap, keyframe_cloud_voxel_size_, 10000);
+}
+
 std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
-    const CloudPtr &current_cloud, std::size_t historical_index,
+    const CloudPtr &current_cloud, std::size_t current_index,
+    std::size_t historical_index,
     const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const {
+  // STD supplies only ICP's initial guess. Reject plausible-looking but weak
+  // alignments using fit, correction size and overlap before graph insertion.
   if (historical_index >= frames_.size() || !current_cloud ||
       !std_transform.first.allFinite() || !std_transform.second.allFinite()) {
     return nullptr;
@@ -256,8 +298,6 @@ std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
   const CloudPtr target = historicalSubmap(historical_index);
   if (source->size() < static_cast<std::size_t>(icp_min_points_) ||
       target->size() < static_cast<std::size_t>(icp_min_points_)) {
-    RCLCPP_INFO(get_logger(), "ICP rejected: insufficient points (%zu source, %zu target, need %d)",
-                source->size(), target->size(), icp_min_points_);
     return nullptr;
   }
 
@@ -276,12 +316,12 @@ std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
   if (aligned.empty() || !icp.hasConverged() ||
       !std::isfinite(icp.getFitnessScore()) ||
       icp.getFitnessScore() > icp_fitness_threshold_) {
-    RCLCPP_INFO(get_logger(), "ICP rejected: converged=%d, aligned=%zu, fitness=%.3f (limit %.3f)",
-                icp.hasConverged(), aligned.size(), icp.getFitnessScore(), icp_fitness_threshold_);
     return nullptr;
   }
   const Eigen::Matrix4f result = icp.getFinalTransformation();
-  if (!result.allFinite()) return nullptr;
+  if (!result.allFinite()) {
+    return nullptr;
+  }
   const Eigen::Matrix4d correction =
       initial.cast<double>().inverse() * result.cast<double>();
   const double correction_translation = correction.block<3, 1>(0, 3).norm();
@@ -289,9 +329,6 @@ std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
       Eigen::AngleAxisd(correction.block<3, 3>(0, 0)).angle());
   if (correction_translation > icp_max_translation_correction_ ||
       correction_rotation > icp_max_rotation_correction_deg_) {
-    RCLCPP_INFO(get_logger(), "ICP rejected: correction %.3f m, %.2f deg (limits %.3f m, %.2f deg)",
-                correction_translation, correction_rotation,
-                icp_max_translation_correction_, icp_max_rotation_correction_deg_);
     return nullptr;
   }
 
@@ -311,8 +348,6 @@ std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
   const double overlap = static_cast<double>(correspondences) /
                          static_cast<double>(aligned.size());
   if (!std::isfinite(overlap) || overlap < icp_min_overlap_ratio_) {
-    RCLCPP_INFO(get_logger(), "ICP rejected: overlap %.3f (minimum %.3f)",
-                overlap, icp_min_overlap_ratio_);
     return nullptr;
   }
 
@@ -332,6 +367,8 @@ void LoopBackendNode::addGraphNode(
     std::size_t index, const gtsam::Pose3 &raw_pose,
     const std::unique_ptr<IcpObservation> &loop,
     std::size_t historical_index) {
+  // Sequential factors preserve local continuity; an accepted loop adds a
+  // robust historical-to-current constraint so iSAM2 can redistribute drift.
   gtsam::NonlinearFactorGraph factors;
   gtsam::Values initial;
   if (index == 0) {
@@ -371,10 +408,10 @@ void LoopBackendNode::addGraphNode(
 
 void LoopBackendNode::onKeyFrame(
     const super_lio_slam::msg::KeyFrame::SharedPtr msg) {
+  // Backend transaction: validate input, propose a place with STD, verify it
+  // geometrically with ICP, then add odometry/loop factors to iSAM2.
   if (backend_faulted_) return;
   if (have_input_id_ && msg->id <= last_input_id_) {
-    RCLCPP_WARN(get_logger(), "Ignoring duplicate or out-of-order keyframe %u",
-                msg->id);
     return;
   }
   gtsam::Pose3 raw_pose;
@@ -382,19 +419,11 @@ void LoopBackendNode::onKeyFrame(
   try {
     raw_pose = poseFromMsg(msg->odom_pose);
     cloud = convertAndFilter(msg->cloud);
-  } catch (const std::exception &error) {
-    RCLCPP_WARN(get_logger(), "Ignoring keyframe %u: %s", msg->id,
-                error.what());
+  } catch (const std::exception &) {
     return;
   }
   if (cloud->size() < 10) {
-    RCLCPP_WARN(get_logger(), "Ignoring sparse keyframe %u (%zu points)",
-                msg->id, cloud->size());
     return;
-  }
-  if (have_input_id_ && msg->id != last_input_id_ + 1) {
-    RCLCPP_WARN(get_logger(), "Keyframe ID gap: %u followed by %u; using dense backend indices",
-                last_input_id_, msg->id);
   }
 
   const std::size_t index = frames_.size();
@@ -404,25 +433,34 @@ void LoopBackendNode::onKeyFrame(
   std::pair<int, double> search_result{-1, 0.0};
   std::pair<Eigen::Vector3d, Eigen::Matrix3d> std_transform;
   std::vector<std::pair<STDesc, STDesc>> matched_pairs;
-  const bool enough_time_since_loop =
-      !have_loop_ || index - last_loop_index_ >=
-                         static_cast<std::size_t>(loop_min_interval_);
+  std::vector<STDLoopCandidate> verified_candidates;
+  CloudPtr descriptor_cloud = descriptorSubmap(cloud, raw_pose);
+  // Suppress near-duplicate factors to the same historical neighborhood,
+  // while still searching for a different place during the cooldown window.
+  const auto is_recent_duplicate = [&](int candidate_id) {
+    if (!have_loop_ || candidate_id < 0 ||
+        index - last_loop_index_ >= static_cast<std::size_t>(loop_min_interval_))
+      return false;
+    const auto historical = static_cast<std::size_t>(candidate_id);
+    const auto gap = historical > last_loop_historical_index_
+        ? historical - last_loop_historical_index_
+        : last_loop_historical_index_ - historical;
+    return gap < static_cast<std::size_t>(loop_min_interval_);
+  };
   const auto plane_count = std_manager_.plane_cloud_vec_.size();
   const auto corner_count = std_manager_.corner_cloud_vec_.size();
   bool adding_descriptors = false;
   try {
-    std_manager_.GenerateSTDescs(cloud, descriptors);
-    if (enough_time_since_loop && !descriptors.empty() &&
+    std_manager_.GenerateSTDescs(descriptor_cloud, descriptors);
+    if (!descriptors.empty() &&
         !std_manager_.plane_cloud_vec_.empty() &&
         std_manager_.plane_cloud_vec_.back()->size() >= 3) {
       std_manager_.SearchLoop(descriptors, search_result, std_transform,
-                              matched_pairs);
+                              matched_pairs, nullptr, &verified_candidates);
     }
     adding_descriptors = true;
     std_manager_.AddSTDescs(descriptors);
-  } catch (const std::exception &error) {
-    RCLCPP_ERROR(get_logger(), "STD failed on keyframe %u: %s", msg->id,
-                 error.what());
+  } catch (const std::exception &) {
     if (adding_descriptors) {
       // Insertion into STD's hash table is not transactional.
       backend_faulted_ = true;
@@ -435,25 +473,32 @@ void LoopBackendNode::onKeyFrame(
     return;
   }
 
+  // Rank is capped before duplicate filtering. Lower-ranked hypotheses are
+  // deliberately not searched: sparse STD matches can contain many impostors.
+  const std::size_t ranked_limit = std::min<std::size_t>(
+      verified_candidates.size(), static_cast<std::size_t>(icp_max_std_candidates_));
   std::size_t historical_index = 0;
   std::unique_ptr<IcpObservation> loop;
-  if (search_result.first >= 0 &&
-      static_cast<std::size_t>(search_result.first) < index) {
-    historical_index = static_cast<std::size_t>(search_result.first);
+  for (std::size_t rank = 0; rank < ranked_limit; ++rank) {
+    const auto &candidate = verified_candidates[rank];
+    if (candidate.frame_id < 0 ||
+        static_cast<std::size_t>(candidate.frame_id) >= index ||
+        is_recent_duplicate(candidate.frame_id) ||
+        candidate.matched_descriptors <
+            static_cast<std::size_t>(loop_min_descriptor_inliers_)) continue;
+    const auto candidate_index = static_cast<std::size_t>(candidate.frame_id);
     try {
-      loop = verifyWithIcp(cloud, historical_index, std_transform);
-    } catch (const std::exception &error) {
-      RCLCPP_WARN(get_logger(), "ICP rejected keyframe %u: %s", msg->id,
-                  error.what());
+      loop = verifyWithIcp(cloud, index, candidate_index, candidate.transform);
+    } catch (const std::exception &) {
+      // Failed candidates are intentionally silent; only accepted loops are logged.
     }
     if (loop) {
+      historical_index = candidate_index;
       RCLCPP_INFO(get_logger(),
-                  "Loop %zu -> %zu accepted: STD %.3f, ICP fitness %.3f, overlap %.2f",
-                  historical_index, index, search_result.second,
-                  loop->fitness, loop->overlap);
-    } else {
-      RCLCPP_INFO(get_logger(), "Loop candidate %zu -> %zu rejected by ICP",
-                  historical_index, index);
+                  "Loop accepted: keyframes %zu -> %zu, STD descriptor inliers=%zu, plane_score=%.3f, ICP error=%.6f m^2, overlap=%.2f",
+                  historical_index, index, candidate.matched_descriptors,
+                  candidate.plane_score, loop->fitness, loop->overlap);
+      break;
     }
   }
 
@@ -465,9 +510,7 @@ void LoopBackendNode::onKeyFrame(
   frames_.push_back(std::move(frame));
   try {
     addGraphNode(index, raw_pose, loop, historical_index);
-  } catch (const std::exception &error) {
-    RCLCPP_ERROR(get_logger(), "iSAM2 update failed on keyframe %u: %s",
-                 msg->id, error.what());
+  } catch (const std::exception &) {
     backend_faulted_ = true;
     std::lock_guard<std::mutex> lock(map_tf_mutex_);
     have_map_transform_ = false;
@@ -476,20 +519,21 @@ void LoopBackendNode::onKeyFrame(
   if (loop) {
     loops_.emplace_back(historical_index, index);
     last_loop_index_ = index;
+    last_loop_historical_index_ = historical_index;
     have_loop_ = true;
   }
   try {
     publishCurrent(index, static_cast<bool>(loop));
     publishStdTriangles(index, descriptors);
-  } catch (const std::exception &error) {
-    RCLCPP_ERROR(get_logger(), "Unable to publish keyframe %u: %s", msg->id,
-                 error.what());
+  } catch (const std::exception &) {
   }
   last_input_id_ = msg->id;
   have_input_id_ = true;
 }
 
 void LoopBackendNode::publishCurrent(std::size_t index, bool loop_accepted) {
+  // A loop can move old poses too, so all published geometry uses the latest
+  // optimized map poses; map<-world TF keeps the LIO frame aligned to them.
   const Frame &frame = frames_[index];
   nav_msgs::msg::Odometry odom;
   odom.header.stamp = frame.stamp;

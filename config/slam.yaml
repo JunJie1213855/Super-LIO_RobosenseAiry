@@ -4,14 +4,14 @@ super_lio_node:
     slam.keyframe.distance: 1.5
     slam.keyframe.angle_deg: 10.0
     slam.keyframe.max_interval: 3.0
-    slam.keyframe.min_points: 100
-    slam.keyframe.voxel_leaf: 0.5
+    slam.keyframe.min_points: 250
+    slam.keyframe.voxel_leaf: 0.2
 
 loop_backend_node:
   ros__parameters:
     # STD plane and triangle descriptor extraction.
     ds_size: 0.5
-    maximum_corner_num: 100
+    maximum_corner_num: 250
     plane_detection_thre: 0.01
     plane_merge_normal_thre: 0.2
     voxel_size: 2.0
@@ -19,23 +19,30 @@ loop_backend_node:
     proj_image_resolution: 0.5
     proj_dis_min: 0.0
     proj_dis_max: 5.0
-    corner_thre: 10.0
+    corner_thre: 2.0
     descriptor_near_num: 10
     descriptor_min_len: 2.0
     descriptor_max_len: 50.0
     non_max_suppression_radius: 2.0
     std_side_resolution: 0.2
-    skip_near_num: 50
+    skip_near_num: 10
     candidate_num: 50
     sub_frame_num: 10
     vertex_diff_threshold: 0.5
-    rough_dis_threshold: 0.01
+    rough_dis_threshold: 0.1
     normal_threshold: 0.2
     dis_threshold: 0.5
     icp_threshold: 0.4
+    
+    # Unitree L1 has few points per scan; combine nearby keyframes in the
+    # current IMU frame before constructing STD descriptors.
+    std_submap_num_frames: 4
+    std_submap_max_distance: 6.0
+    icp_max_std_candidates: 3
+    loop_min_descriptor_inliers: 6
 
     # ICP turns a candidate into a measured relative pose only if it passes gates.
-    keyframe_cloud_voxel_size: 0.25
+    keyframe_cloud_voxel_size: 0.2
     keyframe_cloud_max_points: 30000
     icp_voxel_size: 0.5
     icp_max_correspondence_distance: 2.0
@@ -50,7 +57,8 @@ loop_backend_node:
     icp_max_target_points: 50000
 
     # iSAM2 graph, corrected map, and repeated-loop suppression.
-    loop_min_interval: 20
+    loop_min_interval: 20  # same historical neighborhood
+    loop_diagnostic_stride: 1  # 0 disables per-keyframe STD summaries
     graph_prior_translation_sigma: 0.001
     graph_prior_rotation_sigma: 0.001
     graph_odom_translation_sigma: 0.1

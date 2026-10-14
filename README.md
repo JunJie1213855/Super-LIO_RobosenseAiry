@@ -38,7 +38,7 @@ ros2 launch super_lio_slam robo_slam.launch.py rviz:=true use_sim_time:=true
 ros2 bag play /home/ros/dataset/robosense/mapping --clock
 ```
 
-The Robosense configuration publishes the full deskewed scan on `/lio/cloud_world` (`lio.output.dense: true`). This changes the front-end visualization output; STD/ICP use the separately filtered keyframes. The corrected `/lio_slam/map` is independently downsampled by the backend map settings in `config/slam.yaml`.
+With `lio.output.dense: true`, `/lio/cloud_world_dense` publishes every complete deskewed scan transformed into `world`, independently of `lio.output.map` and `lio.output.pub_step`. `/lio/cloud_world` retains its configurable visualization behavior. These are current scans, not an accumulated map; a Unitree L1 scan in the recorded bag contains about 2100 points. The Robosense backend still uses its separately filtered keyframes. The corrected `/lio_slam/map` is independently downsampled by the backend map settings in `config/slam.yaml`.
 
 `config/robosense_airy.yaml` enables `lio.ros.align_sensor_time_to_ros_clock`. It waits for the simulated ROS clock, then computes one offset for published odometry, clouds, keyframes, and TF; the LIO estimator still uses the original shared device time for LiDAR/IMU synchronization. Other sensor configurations leave this opt-in setting disabled.
 
@@ -50,7 +50,7 @@ ros2 bag play /home/ros/dataset/unitree/L1 --clock
 ```
 
 `config/unitree_l1.yaml` selects LiDAR type `9`, and `config/unitree_slam.yaml`
-sets STD extraction thresholds for the sparse L1 keyframe clouds. The adapter reads the
+keeps Unitree keyframes and STD input free of voxel downsampling (`slam.keyframe.voxel_leaf: 0.0` and `keyframe_cloud_voxel_size: 0.0`). The adapter reads the
 `PointCloud2` fields `x`, `y`, `z`, `intensity`, `ring`, and float32 `time`;
 `time` is a per-point offset from the message header in seconds (adjust
 `lio.sensor.timestamp_unit` if another Unitree driver uses milliseconds,
@@ -76,6 +76,10 @@ The copied single-node launch files continue to run Super-LIO without the loop b
 The SLAM RViz view draws the latest keyframe's STD triangles in cyan with yellow vertices. Set `std_visualization_max_triangles` in `config/slam.yaml` to limit clutter, or set it to `0` to hide them. The markers use corrected `map` coordinates and replace the previous keyframe's triangles.
 
 `config/slam.yaml` contains all keyframe, STD, ICP, graph, and map parameters. `icp_fitness_threshold` is the mean squared correspondence error in square metres. `map_max_keyframes` limits the number of keyframes used when rebuilding a published map; set it to `0` for the full accumulated trajectory. `map_max_points_per_keyframe` bounds map publication cost independently of the stored registration clouds.
+
+Each backend keyframe emits a `Loop search` summary (set `loop_diagnostic_stride: 0` to disable it, or increase the stride to reduce output). `stage` identifies the first failed gate: `few_corners`/`no_triangles`/`few_planes` for extraction; `no_hash_candidates`, `near_frames_only`, `side_length_rejected`, `vertex_rejected` for STD rough matching; `few_pairs_per_frame` for the minimum five pairs; `triangle_vote_rejected` for fewer than four consistent triangles; and `plane_score_rejected` for a plane score below `icp_threshold`. The summary includes counts at each filter, the strongest verified candidate, and active thresholds. `best` is the dense backend keyframe index, while `input` is the incoming keyframe ID. When STD passes, `ICP history -> current rejected` gives the fitness, correction, overlap, or point-count gate and its limit. A candidate must be more than `skip_near_num` backend keyframes old; both current Robosense and Unitree configurations use 10. A visual revisit alone does not prove that STD can form a valid candidate; these logs locate the rejection stage before tuning thresholds.
+
+On the Robosense `mapping/` bag (98 seconds, 50 backend keyframes), the previous configuration produced zero triangles on 44 frames and only 1–4 triangles on the other six. Its `skip_near_num: 50` excluded every historical frame. With `slam.keyframe.voxel_leaf: 0.2`, `keyframe_cloud_voxel_size: 0.2`, `corner_thre: 2.0`, and `skip_near_num: 10`, a full replay generated roughly 300–600 triangles per frame and accepted loop 24 → 38 (STD score 0.807, ICP fitness 0.064, overlap 1.00). These tested settings are now the Robosense defaults in `config/slam.yaml`; Unitree retains its separate configuration.
 
 For an initial check, inspect `/lio_slam/keyframe`, `/lio_slam/path`, and the `map → world → imu` TF chain while replaying a bag that revisits a place. A candidate becomes a graph factor only after the ICP gates pass; compare the corrected path and map with the front-end path after a completed loop.
 

@@ -145,6 +145,14 @@ def main():
                 estimated_yaw = 2 * np.arctan2(pose.orientation.z, pose.orientation.w)
                 assert abs(estimated_yaw - true_yaw) < 0.06, 'Incorrect loop rotation direction'
             print(f'PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> {corrected:.4f} m corrected')
+        log.flush()
+        diagnostic_log = Path(log.name).read_text()
+        assert 'Loop search input=' in diagnostic_log, 'Missing STD search diagnostics'
+        assert 'hash_candidates=' in diagnostic_log and 'plane_score=' in diagnostic_log, \
+            'Missing STD filter or geometry metrics'
+        if args.reject_icp:
+            assert 'rejected: insufficient points' in diagnostic_log, \
+                'Missing ICP gate diagnostic'
         print(f'Backend log: {log.name}')
     finally:
         node.destroy_node()

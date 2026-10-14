@@ -271,6 +271,31 @@ struct PlaneSolver {
   Eigen::Vector3d target_normal;
 };
 
+struct STDCandidateDiagnostics {
+  int frame_id = -1;
+  size_t rough_pairs = 0;
+  int triangle_votes = 0;
+  size_t inlier_pairs = 0;
+  double plane_score = -1.0;
+};
+
+struct STDLoopCandidate {
+  int frame_id = -1;
+  double plane_score = 0.0;
+  size_t matched_descriptors = 0;
+  std::pair<Eigen::Vector3d, Eigen::Matrix3d> transform;
+};
+
+struct STDSearchDiagnostics {
+  size_t hash_candidates = 0;
+  size_t age_eligible = 0;
+  size_t side_pass = 0;
+  size_t rough_pairs = 0;
+  size_t rough_frames = 0;
+  size_t eligible_frames = 0;
+  std::vector<STDCandidateDiagnostics> candidates;
+};
+
 class STDescManager {
 public:
   STDescManager() = default;
@@ -306,7 +331,9 @@ public:
   void SearchLoop(const std::vector<STDesc> &stds_vec,
                   std::pair<int, double> &loop_result,
                   std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
-                  std::vector<std::pair<STDesc, STDesc>> &loop_std_pair);
+                  std::vector<std::pair<STDesc, STDesc>> &loop_std_pair,
+                  STDSearchDiagnostics *diagnostics = nullptr,
+                  std::vector<STDLoopCandidate> *verified_candidates = nullptr);
 
   // add descriptors to database
   void AddSTDescs(const std::vector<STDesc> &stds_vec);
@@ -355,13 +382,15 @@ private:
   // Select a specified number of candidate frames according to the number of
   // STDesc rough matches
   void candidate_selector(const std::vector<STDesc> &stds_vec,
-                          std::vector<STDMatchList> &candidate_matcher_vec);
+                          std::vector<STDMatchList> &candidate_matcher_vec,
+                          STDSearchDiagnostics *diagnostics);
 
   // Get the best candidate frame by geometry check
   void
   candidate_verify(const STDMatchList &candidate_matcher, double &verify_score,
                    std::pair<Eigen::Vector3d, Eigen::Matrix3d> &relative_pose,
-                   std::vector<std::pair<STDesc, STDesc>> &sucess_match_vec);
+                   std::vector<std::pair<STDesc, STDesc>> &sucess_match_vec,
+                   int *max_votes = nullptr);
 
   // Get the transform between a matched std pair
   void triangle_solver(std::pair<STDesc, STDesc> &std_pair, Eigen::Vector3d &t,

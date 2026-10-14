@@ -44,13 +44,11 @@
     lio.kf.kf_quit_eps: 0.001
 
     lio.output.robot: false
-    lio.output.plan_env_world: false
-    lio.output.plan_env_body: false
+    lio.output.plan_env_world: true
+    lio.output.plan_env_body: true
     lio.output.ml_map: false
     lio.output.planner: false
     lio.output.map: true
-    lio.output.dense: false
-    lio.output.pub_step: 1
-    # Publish the full deskewed current scan on /lio/cloud_world.
     lio.output.dense: true
+    lio.output.pub_step: 1
     lio.eva.timer: false
